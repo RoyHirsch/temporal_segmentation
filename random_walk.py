@@ -187,14 +187,14 @@ def extract_timestamps_based_sparse_prior(labels: np.ndarray,
   sparse_prior = np.zeros((num_phases, num_frames))
   for j in timestamp_indices:
     i = labels[j]
-    sparse_prior[j, i] = value
+    sparse_prior[i, j] = value
     if smooth:
       for m, n in enumerate(range(j - smooth, j)):
         if n >= 0:
-          sparse_prior[n, i] = (value / (smooth + 1) * (m + 1))
+          sparse_prior[i, n] = (value / (smooth + 1) * (m + 1))
       for m, n in enumerate(range(j + smooth, j, -1)):
         if n < num_frames:
-          sparse_prior[n, i] = (value / (smooth + 1) * (m + 1))
+          sparse_prior[i, n] = (value / (smooth + 1) * (m + 1))
   return sparse_prior
 
 DEFAULT_PARAMS = {
@@ -240,11 +240,3 @@ def predict_random_walk_with_timestamps(frames, labels, timestamps, actions_dict
 
   sparse_prior = extract_timestamps_based_sparse_prior(labels, timestamps, actions_dict, value=1., smooth=params['smooth'])
   return predict_random_walk_with_prior(frames, sparse_prior, params)
-
-
-if __name__ == '__main__':
-  n = 10
-  c = 3
-  l = np.random.normal(1,0,(n,n))
-  prior = np.random.normal(1,0,(c,n))
-  predict(laplacian_matix=l, prior=prior)
