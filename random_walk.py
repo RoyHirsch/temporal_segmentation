@@ -1,11 +1,8 @@
-import pickle
-from typing import Sequence, Optional, Tuple, Mapping, Callable
+from typing import Optional, Mapping, Callable, Union, Sequence, Any
 import functools
-from PIL import Image
 from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances
 from sklearn.preprocessing import normalize
 from scipy import sparse
-from scipy.special import softmax
 from scipy.sparse import csgraph
 import numpy as np
 
@@ -13,47 +10,58 @@ import numpy as np
 def get_affinity_matrix(frames: np.array,
                         simillarity_method: str, 
                         post_process_fn: Callable = lambda x: x):
-  """Calculate the dense similarity matrix between the frames' reprentations."""
+  """Calculates the dense similarity matrix between the frames' reprentations.
+  
+  Attributse:
+    frames: A numpy array with shape [num_frames, hidden_dim].
+    simillarity_method: The simillarity method name, supports: [cosine, euclidean, norm_euclidean].
+    post_process_fn: Optional function for post processing.
+
+  Returns:
+    The scores matrix with shape [num_frames, num_frames]
+  """
 
   if simillarity_method == 'cosine':
-    w_mat = cosine_similarity(frames, frames)  
+    weights_matrix = cosine_similarity(frames, frames)  
   if simillarity_method == 'euclidean':
-    w_mat = euclidean_distances(frames, frames)**2
+    weights_matrix = euclidean_distances(frames, frames) ** 2
   elif simillarity_method == 'norm_euclidean':
     frames = normalize(frames, axis=1, norm='l2')
-    w_mat = euclidean_distances(frames, frames)**2
-  return post_process_fn(w_mat)
+    weights_matrix = euclidean_distances(frames, frames) ** 2
+  return post_process_fn(weights_matrix)
 
 
-def sparsify_affine_matrix(w_mat: np.array,
+def sparsify_affine_matrix(weights_matrix: np.array,
                            m: int,
                            average_method: str,
                            tau: float = 0.5,
                            post_process_fn: Callable = lambda x: x):
-  """A method for sparsifying the affine matrix, to inlude 2 neighbors per node.
-  Also includes logic for averaging 'm' edges weights for calculating the sparse
-  affine matrix.
+  """Sparsifies the affine matrix.
 
-  Args:
-   w_mat: The dense affine matrix, shape (n_frames, n_frames)
-   m: The number of neighbors to aggregate weights (from one-side)
-   average_method: The method for averaging the m weight's values
-   tau: For Daniel's method
-   post_process_fn: Post processing of the weights values.
+  Keep only scores of the current frame and nearest neighbors (t-1, t, t+1).
+  Also includes a mechnism for averaging the weights of 'm' neighbors (from each side).
+
+  Attributse:
+   w_mat: The dense affine matrix with shape [num_frames, num_frames].
+   m: The number of neighbors to aggregate weights (from one-side).
+   average_method: The method for averaging the m weight's values, supports: [sum, min, mean, weighted_mean, max, daniel].
+   tau: For Daniel's method (see Overleaf).
+   post_process_fn: Optional function for post processing.
+
   Returs:
    sparse_w_mat, same shape as w_mat
   """
-  n = len(w_mat)
-  rs = [np.array([w_mat[i, j] if j < n else 0.0 for j in range(i + 1, i + m + 1)]) for i in range(n)]
-  ls = [np.array([w_mat[i, j] if j >= 0 else 0.0 for j in range(i - m, i)]) for i in range(n)]
+  n = len(weights_matrix)
+  rs = [np.array([weights_matrix[i, j] if j < n else 0.0 for j in range(i + 1, i + m + 1)]) for i in range(n)]
+  ls = [np.array([weights_matrix[i, j] if j >= 0 else 0.0 for j in range(i - m, i)]) for i in range(n)]
 
   r = np.stack(rs, 1)[:,:-1]
   l = np.stack(ls, 1)[:,1:]
 
-  sparse_w_mat = np.zeros_like(w_mat)
+  sparse_weights_matrix = np.zeros_like(weights_matrix)
   if average_method == 'mean':
-    np.fill_diagonal(sparse_w_mat[:, 1:], r.mean(0))
-    np.fill_diagonal(sparse_w_mat[1:, :], l.mean(0))
+    np.fill_diagonal(sparse_weights_matrix[:, 1:], r.mean(0))
+    np.fill_diagonal(sparse_weights_matrix[1:, :], l.mean(0))
 
   if average_method == 'weighted_mean':
     # correction for the first m rows 
@@ -61,72 +69,123 @@ def sparsify_affine_matrix(w_mat: np.array,
     for j in range(1, m):
       wls.append(np.concatenate([np.zeros(m - j), np.arange(1, j + 1) / sum(np.arange(j + 1))]))
     wl_v = np.arange(1, m + 1) / sum(np.arange(m + 1))
-    wl = np.concatenate([np.stack(wls), np.tile(wl_v, (len(sparse_w_mat) - m, 1))])
+    wl = np.concatenate([np.stack(wls), np.tile(wl_v, (len(sparse_weights_matrix) - m, 1))])
 
     wr = np.flipud(wl)
     r *= wr.T
     l *= wl.T
-    np.fill_diagonal(sparse_w_mat[:, 1:], post_process_fn(r.sum(0)))
-    np.fill_diagonal(sparse_w_mat[1:, :], post_process_fn(l.sum(0)))
+    np.fill_diagonal(sparse_weights_matrix[:, 1:], post_process_fn(r.sum(0)))
+    np.fill_diagonal(sparse_weights_matrix[1:, :], post_process_fn(l.sum(0)))
 
   if average_method == 'sum':
-    np.fill_diagonal(sparse_w_mat[:, 1:], r.sum(0))
-    np.fill_diagonal(sparse_w_mat[1:, :], l.sum(0))
+    np.fill_diagonal(sparse_weights_matrix[:, 1:], r.sum(0))
+    np.fill_diagonal(sparse_weights_matrix[1:, :], l.sum(0))
 
   elif average_method == 'min':
-    np.fill_diagonal(sparse_w_mat[:, 1:], r.min(0))
-    np.fill_diagonal(sparse_w_mat[1:, :], l.min(0))
+    np.fill_diagonal(sparse_weights_matrix[:, 1:], r.min(0))
+    np.fill_diagonal(sparse_weights_matrix[1:, :], l.min(0))
 
   elif average_method == 'max':
-    np.fill_diagonal(sparse_w_mat[:, 1:], r.max(0))
-    np.fill_diagonal(sparse_w_mat[1:, :], l.max(0))
+    np.fill_diagonal(sparse_weights_matrix[:, 1:], r.max(0))
+    np.fill_diagonal(sparse_weights_matrix[1:, :], l.max(0))
 
   elif average_method == 'daniel':
-    np.fill_diagonal(sparse_w_mat[:, 1:], (r >= tau).sum(0) / m)
-    np.fill_diagonal(sparse_w_mat[1:, :], (l >= tau).sum(0) / m)
+    np.fill_diagonal(sparse_weights_matrix[:, 1:], (r >= tau).sum(0) / m)
+    np.fill_diagonal(sparse_weights_matrix[1:, :], (l >= tau).sum(0) / m)
 
-  return sparse_w_mat
+  return sparse_weights_matrix
 
 
 def power(x, a):
   return np.power(x, a)
 
 
-def solve(laplacian, prior, gamma=1e-2):
-  """Solve Ax = b with the for s phases with temporal prior.
-   can be a vector or a scalar.
+def solve(laplacian_matix: np.ndarray,
+          prior: np.ndarray,
+          gamma:Union[np.ndarray, int] = 1e-2):
+  """Solves the array of linear equesions.
+
+  Solves (L + gamma * I) x_s = gamma * z_j, where:
+    L is laplacian matrix with shape [num_frames, num_frames]
+    z_j is the prior vector with shape [num_frames]
+    Gamma is a weight factor that controls the prior strenght, can be a vector or a scalar.
+  This function solves this linear equesion for every phase/class.
+
+  Attributse:
+    laplacian_matix: The laplacian matrix with shape [num_frames, num_frames].
+    prior: The prior matrix with shape [num_phases, num_frames].
+    gamma: Weight factor that controls the prior strenght.
+
+  Returns:
+    The phase/class probability per frame, a matrix with shape:[num_phases, num_frames]
   """
+  n = len(laplacian_matix)
+  assert n == prior.shape[1]
 
-  n = len(laplacian)
   if isinstance(gamma, (int, float)):
-    gamma_vec = np.full(shape=(n,), fill_value=gamma) 
+    gamma_vector = np.full(shape=(n,), fill_value=gamma) 
   else:
-    gamma_vec = gamma_vec
+    gamma_vector = gamma_vector
 
-  prior = prior.T
-  lap_sparse = sparse.csr_matrix(laplacian) 
-  gamma_sparse = sparse.coo_matrix((gamma_vec, (range(n), range(n))))
+  lap_sparse = sparse.csr_matrix(laplacian_matix) 
+  gamma_sparse = sparse.coo_matrix((gamma_vector, (range(n), range(n))))
   A_sparse = lap_sparse + gamma_sparse
   A_sparse = A_sparse.tocsc()
   solver = sparse.linalg.factorized(A_sparse.astype(np.double))
-  X = np.array([solver(gamma_vec * label_prior) for label_prior in prior])
+  X = np.array([solver(gamma_vector * label_prior) for label_prior in prior])
   return X
 
 
-def predict(laplacian, prior, gamma=1e-2):
-  """Solve and predict with argmax"""
+def predict(laplacian_matix: np.ndarray,
+            prior: np.ndarray,
+            gamma: Union[np.ndarray, int] = 1e-2):
+  """Solves and predicts the array of linear equesions.
+  
+    Solves (L + gamma * I) x_s = gamma * z_j, where:
+    L is laplacian matrix with shape [num_frames, num_frames]
+    z_j is the prior vector with shape [num_frames]
+    Gamma is a weight factor that controls the prior strenght, can be a vector or a scalar.
+  This function solves this linear equesion for every phase/class and returns the class prediction per frame.
 
-  X = solve(laplacian, prior, gamma=gamma)
+  Attributse:
+    laplacian_matix: The laplacian matrix with shape [num_frames, num_frames].
+    prior: The prior matrix with shape [num_phases, num_frames].
+    gamma: Weight factor that controls the prior strenght.
+
+  Returns:
+    The phase/class prediction per frame, a vector:[num_frames]
+"""
+
+  X = solve(laplacian_matix, prior, gamma)
   preds = np.argmax(X, axis=0)
   return preds
 
 
-def extract_prior(labels, timestamps, actions_dict, value=1., smooth=None):
-  # sparse_prior.shape [num_frames, num_classes]
+def extract_timestamps_based_sparse_prior(labels: np.ndarray,
+                                          timestamp_indices: Union[Sequence[int], np.ndarray],
+                                          num_phases: int,
+                                          value: float = 1.,
+                                          smooth: Optional[int] = None):
+  """Extracts sparse prior based on timestamps.
 
-  duration = len(labels)
-  sparse_prior = np.zeros((len(labels), len(actions_dict)))
-  for j in timestamps:
+  Given a list of timestamps indices, generate a sparse prior matrix with shape [num_phases, num_frames].
+  This sparse matrix contains only the timestamps labels and the other entries are masked.
+  The functino also with smoothing the timestams labels.
+
+  Attributse:
+    labels: A list of ground true lables with shape [num_frames].
+    timestamps: A list of timestamps indices.
+    num_phases: The number of phases.
+    value: The value for the timestamps locations.
+    smooth: Optional smoothing factor.
+
+  Returns:
+    A sparse_prior matrix with shape [num_phases, num_frames]
+  """
+
+  num_frames = len(labels)
+  sparse_prior = np.zeros((num_phases, num_frames))
+  for j in timestamp_indices:
     i = labels[j]
     sparse_prior[j, i] = value
     if smooth:
@@ -134,35 +193,58 @@ def extract_prior(labels, timestamps, actions_dict, value=1., smooth=None):
         if n >= 0:
           sparse_prior[n, i] = (value / (smooth + 1) * (m + 1))
       for m, n in enumerate(range(j + smooth, j, -1)):
-        if n < duration:
+        if n < num_frames:
           sparse_prior[n, i] = (value / (smooth + 1) * (m + 1))
   return sparse_prior
 
-
-PARAMS = {'seed': 0,
-          'topk': 1,
-          'n_neighbors': 50,
+DEFAULT_PARAMS = {
+          'num_neighbors': 50,
           'average_method': 'min',
-          'affine_power_a': 6,
+          'affine_weights_power_factor': 6,
           'prior_lambda': 5e-3,
-          'smooth': 10}
+          'smooth': 10
+          }
 
 
-def run_random_walk(frames, prior, params=PARAMS):
-  w_mat = get_affinity_matrix(frames,
+def predict_random_walk_with_prior(frames: np.ndarray,
+                                   prior: np.ndarray,
+                                   params: Mapping[str, Any] = DEFAULT_PARAMS):
+  """Runs and predicts the random walk with prior.
+
+  Attributse:
+    frames: The video's frames with shape [num_frames, hidden_dim].
+    prior: The prior matrix with shape [num_phases, num_frames].
+    num_phases: The number of phases.
+    params: A dictionary with hyper-parameters.
+
+  Returns:
+    The phase/class prediction per frame, a vector:[num_frames]
+
+  """
+  weights_matrix = get_affinity_matrix(frames,
                               simillarity_method='cosine',
                               post_process_fn=functools.partial(power,
-                                                      a=params['affine_power_a']))
-  sparse_w_mat = sparsify_affine_matrix(w_mat,
-                                        m=params['n_neighbors'],
+                                                      a=params['affine_weights_power_factor']))
+  sparse_weights_matrix = sparsify_affine_matrix(weights_matrix,
+                                        m=params['num_neighbors'],
                                         average_method=params['average_method'])
-  lap = csgraph.laplacian(sparse_w_mat,
+  laplacian_matrix = csgraph.laplacian(sparse_weights_matrix,
                           normed=False)
 
-  preds = predict(lap, prior, params['prior_lambda'])
+  preds = predict(laplacian_matrix, prior, params['prior_lambda'])
   return preds
 
 
-def e2e_random_walk(frames, labels, timestamps, actions_dict, params=PARAMS):
-    sparse_prior = extract_prior(labels, timestamps, actions_dict, value=1., smooth=params['smooth'])
-    return run_random_walk(frames, sparse_prior, params)
+def predict_random_walk_with_timestamps(frames, labels, timestamps, actions_dict, params=DEFAULT_PARAMS):
+  """Runs and predicts the random walk with timestamps prior."""
+
+  sparse_prior = extract_timestamps_based_sparse_prior(labels, timestamps, actions_dict, value=1., smooth=params['smooth'])
+  return predict_random_walk_with_prior(frames, sparse_prior, params)
+
+
+if __name__ == '__main__':
+  n = 10
+  c = 3
+  l = np.random.normal(1,0,(n,n))
+  prior = np.random.normal(1,0,(c,n))
+  predict(laplacian_matix=l, prior=prior)
